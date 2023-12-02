@@ -1,11 +1,14 @@
 import os
 import re
-from pathlib import Path
-from typing import Tuple
+import torchaudio
+import torchvision
+import numpy as np
 
-from torch import Tensor
+from pathlib import Path
 from torch.utils.data import Dataset
 
+
+label_to_index = {'ang': 0, 'fru': 1, 'hap': 2, 'neu': 3, 'sad': 4}
 
 class IEMOCAP(Dataset):
     """
@@ -89,33 +92,27 @@ class IEMOCAP(Dataset):
                 self.video_path_mapping.get(clip_name) is not None):
                     self.data.append(clip_name)
 
-def __getitem__(self, n: int) -> Tuple[Tensor, int, str, str, str]:
-        """Load the n-th sample from the dataset.
+    def __getitem__(self, n):
+            """Load the n-th sample from the dataset"""
 
-        Args:
-            n (int): The index of the sample to be loaded
+            clip_name = self.data[n]
 
-        Returns:
-            Tuple of the following items;
+            label = self.label_mapping[clip_name]
 
-            str:
-                Label (one of "neu", "hap", "ang", "sad", "fru")
-            str:
-                Transcript
-            str:
-                Audio file path
-            str:
-                Video file path
-        """
-        clip_name = self.data[n]
+            audio_path = self.audio_path_mapping[clip_name]
+            waveform, _ = torchaudio.load(audio_path)
+            waveform = waveform.numpy().squeeze()
 
-        label = self.label_mapping[clip_name]
-        transcript = self.transcript_mapping[clip_name]
-        audio_path = self.audio_path_mapping[clip_name]
-        video_path = self.video_path_mapping[clip_name]
+            transcript = self.transcript_mapping[clip_name]
 
-        return (label, transcript, audio_path, video_path)
+            video_path = self.video_path_mapping[clip_name]
+            video, _, _ = torchvision.io.read_video(str(video_path).replace('\\', '/'), output_format="THWC", pts_unit='sec')
+            indices = np.linspace(0, video.shape[0] - 1, 32, dtype=int)
+            video = video[indices]
+            video_frames = [video[i] for i in range(video.shape[0])]
+
+            return (waveform, transcript, video_frames, label_to_index[label])
 
 
-def __len__(self):
-    return len(self.data)
+    def __len__(self):
+        return len(self.data)

@@ -1,94 +1,81 @@
-import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import logging
 
+from tqdm import tqdm
 from torch.utils.data import DataLoader
-from dataset import iemocap
+from torch.nn.utils.rnn import pad_sequence
+from transformers import Wav2Vec2Processor, RobertaTokenizer, VivitImageProcessor
 
-logging.basicConfig(filename='training.log', level=logging.INFO)
+audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
+text_tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+image_processor = VivitImageProcessor.from_pretrained("google/vivit-b-16x2-kinetics400")
 
-# Import your dataset and model here
+def collate_fn(batch):
+    audio_inputs, text_inputs, video_inputs, labels = zip(*batch)
 
-def train(model, dataloader, criterion, optimizer, device):
-    model.train()
-    total_loss = 0.0
+    audio_inputs = audio_processor(audio_inputs, return_tensors='pt', sampling_rate=16000, padding=True)
+    text_inputs = text_tokenizer(text_inputs, return_tensors='pt', padding=True)
+    video_inputs = image_processor(video_inputs, return_tensors="pt", padding=True)
 
-    for inputs, targets in dataloader:
-        inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
+    return audio_inputs, text_inputs, video_inputs, torch.tensor(labels)
 
-    return total_loss / len(dataloader)
 
-def main(args):
-    # Define device (CPU or GPU)
-    device = torch.device("cuda" if torch.cuda.is_available() and args.use_gpu else "cpu")
-
-    # Load your dataset using DataLoader
-    # dataset = YourDataset(...)  # You should define YourDataset elsewhere
-    # dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    dataset = iemocap.IEMOCAP()
-    # Define your model
-    # model = YourModel(...)  # You should define YourModel elsewhere
-    model.to(device)
-
-    # Define loss function and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
+def train(model_name, model, train_data, val_data, epochs, batch_size, learning_rate, audio_modality, text_modality, video_modality):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Optionally resume training from a checkpoint
-    if args.resume_checkpoint:
-        checkpoint = torch.load(args.resume_checkpoint)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_loss = checkpoint['best_loss']
-    else:
-        start_epoch = 0
-        best_loss = float('inf')
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_data, batch_size=batch_size, collate_fn=collate_fn)
 
-    for epoch in range(args.num_epochs):
-        train_loss = train(model, dataloader, criterion, optimizer, device)
-        print(f"Epoch [{epoch + 1}/{args.num_epochs}] - Train Loss: {train_loss:.4f}")
-        logging.info(f"Epoch [{epoch + 1}/{args.num_epochs}] - Train Loss: {train_loss:.4f}")
+    model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
-        # Save model checkpoint if necessary
-        if (epoch + 1) % args.save_interval == 0:
-            checkpoint_path = f'model_checkpoint_epoch_{epoch + 1}.pth'
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_loss': best_loss,
-            }, checkpoint_path)
+    best_val_acc = 0
+    for epoch in range(epochs):
+        model.train()
 
-            # Optionally update best_loss if the current loss is better
-            if train_loss < best_loss:
-                best_loss = train_loss
-                best_checkpoint_path = checkpoint_path
+        total_train_loss = 0
+        for audio_input, text_input, video_input, targets in tqdm(train_loader):
+            if audio_modality:
+                audio_input = audio_input.to(device)
+            if text_modality:
+                text_input = text_input.to(device)
+            if video_modality:
+                video_input = video_input.to(device)
+            targets = targets.to(device)
 
-    # Save the final trained model
-    final_model_path = 'final_model.pth'
-    torch.save(model.state_dict(), final_model_path)
+            optimizer.zero_grad()
+            outputs = model(audio_input, text_input, video_input)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+            total_train_loss += loss.item()
+        train_loss = total_train_loss / len(train_loader)
 
-    # Optionally log the path to the best checkpoint
-    if args.resume_checkpoint:
-        print(f"Training completed. Best checkpoint at: {best_checkpoint_path}")
+        model.eval()
+        with torch.no_grad():
+            total_val_loss = 0; correct = 0; total_samples = 0
+            for audio_input, text_input, video_input, targets in val_loader:
+                audio_input = audio_input.to(device) 
+                text_input = text_input.to(device)
+                video_input = video_input.to(device)
+                targets = targets.to(device)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="PyTorch Training Script")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size for training")
-    parser.add_argument("--learning-rate", type=float, default=0.01, help="Learning rate")
-    parser.add_argument("--num-epochs", type=int, default=10, help="Number of training epochs")
-    parser.add_argument("--use-gpu", action="store_true", help="Use GPU for training if available")
-    parser.add_argument("--save-interval", type=int, default=1, help="Interval for saving model checkpoints")
-    parser.add_argument("--resume-checkpoint", type=str, default=None, help="Path to resume training from a checkpoint")
+                outputs = model(audio_input, text_input, video_input)
+                loss = criterion(outputs, targets)
+                total_val_loss += loss.item()
 
-    args = parser.parse_args()
-    main(args)
+                total_samples += targets.size(0)
+                correct += (outputs.argmax(dim=1) == targets).sum().item()
+            val_loss = total_val_loss / len(val_loader)
+            val_acc = correct / total_samples
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(model.state_dict(), f"{model_name}_best.pth")
+
+        print(f"Epoch [{epoch + 1}/{epochs}] - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Val Acc: {val_acc:.4f}")
+
+    print(f"Training completed.")
+    torch.save(model.state_dict(), f"{model_name}.pth")
