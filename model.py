@@ -5,44 +5,41 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from transformers import Wav2Vec2Model, RobertaModel, VivitModel
 
-class Permute(nn.Module):
-    def __init__(self, dims):
-        super(Permute, self).__init__()
-        self.dims = dims
-
-    def forward(self, x):
-        return x.permute(self.dims)
-
 class Modality(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
+
+        for param in self.model.parameters():
+            param.requires_grad = False
+
         self.weights = nn.Parameter(torch.randn(12))
         self.feed_forward = nn.Sequential(
-            nn.Linear(768, 384),
-            nn.LayerNorm(384),
+            nn.Linear(768, 768),
+            nn.LayerNorm(768),
             nn.LeakyReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(384, 192),
-            nn.LayerNorm(192),
+            nn.Dropout(p=0.2),
+            nn.Linear(768, 768),
+            nn.LayerNorm(768),
             nn.LeakyReLU(),
-            nn.Dropout(p=0.3),
+            nn.Dropout(p=0.2),
         )
-        self.classifier = nn.Linear(192, 5)
+        self.classifier = nn.Linear(768, 5)
+
 
     def forward(self, inputs):
         model_outputs = self.model(**inputs)
         hidden_states = model_outputs.hidden_states[1:]
         hidden_states = self.weighted_average(hidden_states, self.weights)
         x = self.feed_forward(hidden_states)
-        x = self.classifier(torch.mean(x, dim=1))
+        x = self.classifier(x)
         return x
 
     @staticmethod
     def weighted_average(hidden_states, weights):
-        hidden_states = torch.stack(hidden_states, axis=0)
+        hidden_states = torch.stack(hidden_states, axis=0)[:, :, 0]
         weights = F.softmax(weights, dim=0)
-        weights = weights.view(12, 1, 1, 1)
+        weights = weights.view(12, 1, 1)
         weighted_hidden_states = hidden_states * weights
         return torch.sum(weighted_hidden_states, dim=0)
 
@@ -77,6 +74,7 @@ class MultimodalClassificationHead(nn.Module):
         if not outputs:
             raise ValueError("No valid modalities provided")
 
-        x = torch.mean(outputs, dim=1)
+        x = torch.stack(outputs)
+        x = torch.mean(x, dim=0)
 
         return x

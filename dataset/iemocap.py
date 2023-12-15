@@ -16,7 +16,9 @@ class IEMOCAP(Dataset):
         root: For example'.../IEMOCAP_full_release' 
     """
     
-    def __init__(self, root: str): 
+    def __init__(self, root: str, global_mean, global_std): 
+        self.global_mean = global_mean
+        self.global_std = global_std
         self.root = Path(root)
 
         if not os.path.isdir(self.root):
@@ -39,6 +41,7 @@ class IEMOCAP(Dataset):
             video_dir = session_dir / "video"
             transcription_dir = session_dir / "transcriptions"
 
+            # Get all transcriptions
             transcription_paths = transcription_dir.glob("*.txt")
             for transcription_path in transcription_paths:
                  with open(transcription_path, "r") as f:
@@ -54,20 +57,22 @@ class IEMOCAP(Dataset):
                         transcript = subparts[1].strip()
 
                         self.transcript_mapping[clip_name] = transcript
-                 
+            
+            # Get all audio file paths
             audio_paths = audio_dir.glob("*/*.wav")
             for audio_path in audio_paths:
                 clip_name = str(Path(audio_path).stem)
                 all_clip_names.add(clip_name)
                 self.audio_path_mapping[clip_name] = audio_path
 
-
+            # Get all video file paths
             video_paths = video_dir.glob("*/*.avi")
             for video_path in video_paths:
                 clip_name = str(Path(video_path).stem)
                 all_clip_names.add(clip_name)
                 self.video_path_mapping[clip_name] = video_path
 
+            # Get all labels
             label_paths = label_dir.glob("*.txt")
             for label_path in label_paths:
                 with open(label_path, "r") as f:
@@ -85,6 +90,7 @@ class IEMOCAP(Dataset):
                             continue
                         self.label_mapping[clip_name] = label
 
+        # Filter out datapoints without all features
         for clip_name in all_clip_names:
             if (self.label_mapping.get(clip_name) is not None and 
                 self.audio_path_mapping.get(clip_name) is not None and
@@ -97,11 +103,10 @@ class IEMOCAP(Dataset):
 
             clip_name = self.data[n]
 
-            label = self.label_mapping[clip_name]
-
             audio_path = self.audio_path_mapping[clip_name]
             waveform, _ = torchaudio.load(audio_path)
             waveform = waveform.numpy().squeeze()
+            waveform = (waveform - self.global_mean) / self.global_std
 
             transcript = self.transcript_mapping[clip_name]
 
@@ -110,6 +115,8 @@ class IEMOCAP(Dataset):
             indices = np.linspace(0, video.shape[0] - 1, 32, dtype=int)
             video = video[indices]
             video_frames = [video[i] for i in range(video.shape[0])]
+
+            label = self.label_mapping[clip_name]
 
             return (waveform, transcript, video_frames, label_to_index[label])
 
